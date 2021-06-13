@@ -1,0 +1,103 @@
+name: Build, Test, Publish
+on:
+  - push
+
+defaults:
+  run:
+    working-directory: src
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: true
+
+    outputs:
+      is-release: ${{ steps.get-version.outputs.is-release }}
+      version: ${{ steps.get-version.outputs.version }}
+    
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: '5.0.x'
+
+      - name: Set version
+        uses: triaxis-oss/dotnet-set-version@v1
+        id: get-version
+        with:
+          project: src/triaxis.ServiceBase/triaxis.ServiceBase.csproj
+
+      - name: Restore NuGet Packages
+        run: dotnet restore
+
+      - name: Build Release
+        if: steps.get-version.outputs.is-release == 'true'
+        run: dotnet build -c Release "/p:ContinuousIntegrationBuild=true;DeterministicSourcePaths=true"
+
+      - name: Build Development
+        if: steps.get-version.outputs.is-release != 'true'
+        run: dotnet build -c Release "/p:ContinuousIntegrationBuild=true;DeterministicSourcePaths=true;IncludeSymbolsInNuget=true"
+
+      - name: Upload Package Artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: packages
+          path: src/**/*nupkg
+
+      - name: Test
+        run: dotnet test --no-build -c Release -v Normal -l "junit;logFilePath=test-results.xml"
+
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: test-results
+          path: src/**/test-results.xml
+
+  publish-test-results:
+    name: Publish test results
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Fetch Test Artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: test-results
+
+      - name: Publish Test Results
+        uses: docker://ghcr.io/enricomi/publish-unit-test-result-action:latest
+        if: always()
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: '**/test-results.xml'  
+
+  publish-nuget:
+    name: Publish NuGet
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_NOLOGO: true
+    needs: build
+    steps:
+      - name: Fetch Package Artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: packages
+          path: src
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: '5.0.x'
+
+      - name: Publish NuGet Packages
+        if: needs.build.outputs.is-release == 'true'
+        run: dotnet nuget push **/*.nupkg -s nuget.org -k ${{secrets.NUGET_API_KEY}} --skip-duplicate
+
+      - name: Publish GitHub Packages
+        if: needs.build.outputs.is-release != 'true'
+        run: dotnet nuget push **/*.nupkg -s https://${{github.actor}}@nuget.pkg.github.com/${{github.repository_owner}} -k ${{secrets.GITHUB_TOKEN}} --skip-duplicate
